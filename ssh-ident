@@ -404,6 +404,10 @@ CREDITS
 - Carl Drougge, https://www.github.com/drougge, CVE-2016-0777 fix,
   fix for per user config files, and use /bin/env instead of python
   path.
+- Matthias "Maddes" Bücher, https://www.github.com/maddes-b,
+  enhance matching against arguments, enhance pattern handling for files,
+  add support for ssh-agent and ssh-add with choosen identity,
+  enhance ssh options to definable per user and/or binary,
 """
 
 from __future__ import print_function
