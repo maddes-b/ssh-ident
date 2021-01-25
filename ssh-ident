@@ -198,20 +198,27 @@ To have multiple identities, all I have to do is:
 
   # This is optional - don't include any SSH_ADD_OPTIONS if you don't
   # need it.
-  SSH_ADD_OPTIONS = {
+  # Otherwise, provides options to be passed to the ssh-add command for
+  # specific identities. First fitting entry wins.
+  # First element is a list of identities and second element is the
+  # option string.
+  # An empty list means for all identities.
+  SSH_ADD_OPTIONS = [
     # Regardless, ask for confirmation before using any of the
     # work keys.
-    "work": "-c",
+    [ ["work", ], "-c -t 3600"],
     # Forget about secret keys after ten minutes. ssh-ident will
-    # automatically ask you your passphrase again if they are needed.
-    "secret": "-t 600",
-  }
+    # automatically ask for the passphrase again if they are needed.
+    [ ["secret", ], "-t 600"],
+    # Prevent keys remaining in memory for too long (>2h) for all other identities.
+    [ [], "-t 7200"],
+  ]
 
   # This is optional - dont' include any SSH_OPTIONS if you don't
   # need it.
   # Note that separate ssh config files per identity are possible too.
   # Otherwise, provides options to be passed to the ssh command for
-  # specific identities and/or binaries.
+  # specific identities and/or binaries. All fitting entries combined.
   # First element is a list of identities, second element is a list of
   # binaries and third element is the option string.
   # An empty list means for all identities or all binaries.
@@ -231,24 +238,19 @@ To have multiple identities, all I have to do is:
     [["personal", ], [], "-v"],
   ]
 
-  # Which options to use by default if no match with SSH_ADD_OPTIONS
-  # was found. Note that ssh-ident hard codes -t 7200 to prevent your
-  # keys from remaining in memory for too long.
-  SSH_ADD_DEFAULT_OPTIONS = "-t 7200"
-
   # This is optional - don't include any SSH_AGENTS or SSH_ADDS if you
   # don't need it.
   # Otherwise, provides ssh-agent/ssh-add binary to use for key handling
-  # of specific identities.
+  # of specific identities. First fitting entry wins.
   # Those binaries most be compatible to OpenSSH's implementation.
   # First element is a list of identities and second element is the
   # ssh-agent/ssh-add binary name.
   # An empty list means for all identities.
-  "SSH_AGENTS": [
+  "SSH_AGENTS" = [
     [ ['work', 'work2', ], "other-ssh-agent"],
     [ ['secret', ], "ssh-pagent"],
   ],
-  "SSH_ADDS": [
+  "SSH_ADDS" = [
     [ ['work1', 'work2', ], "other-ssh-add"],
   ],
 
@@ -606,8 +608,8 @@ class Config(object):
       "MATCH_PATH": [],
       "MATCH_ARGV": [],
 
-      # List with multiple identities, that defines the ssh-agent/ssh-add binary
-      # to handle keys with (first fitting entry wins).
+      # List with multiple identities as key, that defines the ssh-agent/ssh-add
+      # binary to handle keys with (first fitting entry wins).
       # Those binaries most be compatible to OpenSSH's implementation.
       # First element is a list of identities and second element is the
       # ssh-agent/ssh-add binary name.
@@ -620,12 +622,19 @@ class Config(object):
         #[ ['id1', 'id2', ], "other-ssh-add"],
       ],
 
-      # Dictionary with identity as a key, allows to specify
-      # per identity options when using ssh-add.
-      "SSH_ADD_OPTIONS": {},
-      # ssh-add default options. By default, don't keep a key longer
-      # than 2 hours.
-      "SSH_ADD_DEFAULT_OPTIONS": "-t 7200",
+      # List with multiple identities as key, automatically adds the specified
+      # options when using ssh-add (first fitting entry wins).
+      # First element is a list of identities and second element is the
+      # option string.
+      # An empty list means for all identities.
+      # Replaces old SSH_ADD_DEFAULT_OPTIONS, just use [[], "options"].
+      # By default, don't keep a key longer than 2 hours.
+      "SSH_ADD_OPTIONS": [
+        #[ ['id1', 'id2', ], "-opt1 value1 -opt2"],
+        [ [], "-t 7200"], ## replacement of old SSH_ADD_DEFAULT_OPTIONS default
+      ],
+      #
+      "SSH_ADD_DEFAULT_OPTIONS": None, ## use replacement in SSH_ADD_OPTIONS
 
       # Like BatchMode in ssh, see man 5 ssh_config.
       # In BatchMode ssh-ident will not print any output and not ask for
@@ -693,6 +702,26 @@ class Config(object):
     if parameter in ("SSH_DEFAULT_OPTIONS"):
       if result and not isinstance(result, list):
         result = [[[], [], result]]
+
+    # Convert old format of SSH_ADD_OPTIONS and SSH_ADD_DEFAULT_OPTIONS
+    if parameter in ("SSH_ADD_OPTIONS"):
+      if isinstance(result, dict):
+        new_result = []
+        for identity in result.keys():
+          new_result.append([[identity], result[identity]])
+        result = new_result
+      #
+      new_result = self.Get("SSH_ADD_DEFAULT_OPTIONS")
+      if new_result:
+        result.extend(new_result)
+      #
+      print("{0}: {1}".format(parameter, result),
+          file=sys.stderr,
+          loglevel=LOG_DEBUG)
+    #
+    if parameter in ("SSH_ADD_DEFAULT_OPTIONS"):
+      if result and not isinstance(result, list):
+        result = [[[], result]]
 
     # Compile patterns for speed
     if parameter in ("PATTERN_KEYS", "PATTERN_PUBKEYS", "PATTERN_PRIVKEYS", "MATCH_PATH", "MATCH_ARGV"):
@@ -1009,8 +1038,12 @@ class AgentManager(object):
       keys: iterable of strings, each string a path to a key to load.
     """
     keys = " ".join(keys)
-    options = self.config.Get("SSH_ADD_OPTIONS").get(
-        self.identity, self.config.Get("SSH_ADD_DEFAULT_OPTIONS"))
+    options = ""
+    for definition in self.config.Get("SSH_ADD_OPTIONS"):
+      if not definition[0] or self.identity in definition[0]:
+        if definition[1]:
+          options += " {0}".format(definition[1])
+        break
     console = GetSessionTty()
     self.RunShellCommandInAgent(
         self.agent_file, "{0} {1} {2}".format(self.config.Get("BINARY_SSH_ADD"), options, keys),
@@ -1138,11 +1171,11 @@ class AgentManager(object):
   def RunSSH(self, argv):
     """Execs ssh with the specified arguments."""
     additional_flags = ""
-    for binaries in self.config.Get("SSH_OPTIONS"):
-      if not binaries[0] or self.identity in binaries[0]:
-        if not binaries[1] or self.binary in binaries[1]:
-          if binaries[2]:
-            additional_flags += " {0}".format(binaries[2])
+    for definition in self.config.Get("SSH_OPTIONS"):
+      if not definition[0] or self.identity in definition[0]:
+        if not definition[1] or self.binary in definition[1]:
+          if definition[2]:
+            additional_flags += " {0}".format(definition[2])
     if (self.ssh_config):
       additional_flags += " -F {0}".format(self.ssh_config)
 
@@ -1398,14 +1431,14 @@ def main(argv):
     "BINARY_SSH_ADD": ['ssh-add', ],
   }
   #
-  for binaries in config.Get("SSH_AGENTS"):
-    if not binaries[0] or identity in binaries[0]:
-      binary_checks["BINARY_SSH_AGENT"] = [binaries[1]]
+  for definition in config.Get("SSH_AGENTS"):
+    if not definition[0] or identity in definition[0]:
+      binary_checks["BINARY_SSH_AGENT"] = [definition[1]]
       break
   #
-  for binaries in config.Get("SSH_ADDS"):
-    if not binaries[0] or identity in binaries[0]:
-      binary_checks["BINARY_SSH_ADD"] = [binaries[1]]
+  for definition in config.Get("SSH_ADDS"):
+    if not definition[0] or identity in definition[0]:
+      binary_checks["BINARY_SSH_ADD"] = [definition[1]]
       break
   #
   AutodetectBinary(argv[0], binary_checks, config)
